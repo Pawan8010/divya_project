@@ -1,5 +1,7 @@
 streamlit==1.32.0
-openai==0.28.0
 langchain==0.1.14
 pydantic==1.10.13
-tiktoken
+transformers==4.36.2
+sentence-transformers
+faiss-cpu
+pypdf

@@ -1,73 +1,84 @@
 import streamlit as st
-from runner import run_model
+import os
 
-# ---------------- CONFIG ----------------
-st.set_page_config(page_title="AI Copilot", page_icon="🤖", layout="wide")
+from langchain_community.document_loaders import PyPDFLoader
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_community.vectorstores import FAISS
+from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain.chains import RetrievalQA
 
-# ---------------- CSS ----------------
-st.markdown("""
-<style>
-.stApp {background: #0E1117; color: white;}
-.block-container {padding-top: 2rem;}
+from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
+from langchain_community.llms import HuggingFacePipeline
 
-.chat-container {
-    max-width: 800px;
-    margin: auto;
-}
+# ---------------- UI ----------------
+st.set_page_config(page_title="PDF QA App", page_icon="📄")
 
-.user {
-    background: #1f2937;
-    padding: 10px;
-    border-radius: 10px;
-    margin: 5px 0;
-}
+st.title("📄 PDF Question Answering App")
+st.write("Upload a PDF and ask questions!")
 
-.bot {
-    background: #111827;
-    padding: 10px;
-    border-radius: 10px;
-    margin: 5px 0;
-}
-</style>
-""", unsafe_allow_html=True)
+# ---------------- FILE UPLOAD ----------------
+uploaded_file = st.file_uploader("Upload PDF", type="pdf")
 
-# ---------------- HEADER ----------------
-st.markdown("<h1 style='text-align:center;'>🤖 AI Copilot</h1>", unsafe_allow_html=True)
-st.markdown("<p style='text-align:center;color:gray;'>Next-gen LLM Assistant</p>", unsafe_allow_html=True)
+# ---------------- MODEL LOADING ----------------
+@st.cache_resource
+def load_llm():
+    model_name = "google/flan-t5-base"
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    model = AutoModelForSeq2SeqLM.from_pretrained(model_name)
 
-# ---------------- SIDEBAR ----------------
-with st.sidebar:
-    st.title("⚙️ Control Panel")
-    temperature = st.slider("Creativity", 0.0, 1.0, 0.5)
-    model = st.selectbox("Model", ["Default", "Advanced"])
-    st.markdown("---")
-    st.success("System Ready ✅")
+    def generate_text(prompt):
+        input_ids = tokenizer.encode(prompt, return_tensors="pt")
+        outputs = model.generate(input_ids, max_new_tokens=256)
+        return tokenizer.decode(outputs[0], skip_special_tokens=True)
 
-# ---------------- SESSION ----------------
-if "messages" not in st.session_state:
-    st.session_state.messages = []
+    class CustomPipeline:
+        def __call__(self, inputs, **kwargs):
+            if isinstance(inputs, list):
+                return [[{'generated_text': generate_text(i)}] for i in inputs]
+            return [{'generated_text': generate_text(inputs)}]
 
-# ---------------- CHAT DISPLAY ----------------
-st.markdown("<div class='chat-container'>", unsafe_allow_html=True)
+    return HuggingFacePipeline(pipeline=CustomPipeline())
 
-for msg in st.session_state.messages:
-    if msg["role"] == "user":
-        st.markdown(f"<div class='user'>👤 {msg['content']}</div>", unsafe_allow_html=True)
-    else:
-        st.markdown(f"<div class='bot'>🤖 {msg['content']}</div>", unsafe_allow_html=True)
+# ---------------- PROCESS PDF ----------------
+@st.cache_resource
+def process_pdf(file_path):
+    loader = PyPDFLoader(file_path)
+    documents = loader.load()
 
-st.markdown("</div>", unsafe_allow_html=True)
+    splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=100)
+    docs = splitter.split_documents(documents)
 
-# ---------------- INPUT ----------------
-user_input = st.chat_input("Ask anything...")
+    embeddings = HuggingFaceEmbeddings(
+        model_name="sentence-transformers/all-MiniLM-L6-v2"
+    )
 
-# ---------------- PROCESS ----------------
-if user_input:
-    st.session_state.messages.append({"role": "user", "content": user_input})
+    db = FAISS.from_documents(docs, embeddings)
+    retriever = db.as_retriever(search_kwargs={"k": 3})
 
-    with st.spinner("Generating response... ⚡"):
-        response = run_model(user_input)   # 🔥 CONNECTED HERE
+    return retriever
 
-    st.session_state.messages.append({"role": "assistant", "content": response})
+# ---------------- MAIN LOGIC ----------------
+if uploaded_file:
+    with open("temp.pdf", "wb") as f:
+        f.write(uploaded_file.read())
 
-    st.rerun()
+    st.success("PDF uploaded successfully!")
+
+    retriever = process_pdf("temp.pdf")
+    llm = load_llm()
+
+    qa_chain = RetrievalQA.from_chain_type(
+        llm=llm,
+        retriever=retriever
+    )
+
+    # ---------------- USER INPUT ----------------
+    query = st.text_input("Ask a question:")
+
+    if st.button("Get Answer"):
+        if query:
+            with st.spinner("Thinking..."):
+                result = qa_chain.run(query)
+            st.success(result)
+        else:
+            st.warning("Please enter a question")
